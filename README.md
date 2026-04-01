@@ -60,6 +60,24 @@ Click the **☀** icon in your menu bar to:
 - Choose brightness level (1.5x, 2.0x, 3.0x, 4.0x)
 - Quit
 
+### Keyboard shortcut
+
+**Ctrl+Shift+B** — toggle XDR brightness on/off from anywhere, no need to find the menu bar icon.
+
+### Emergency kill
+
+If something goes wrong and you can't see your screen:
+
+```bash
+# From terminal (even blind-type it)
+xdr-boost --kill
+
+# Or just
+pkill xdr-boost
+```
+
+The app always starts with XDR **off** — you have to manually turn it on. So rebooting will always give you a normal screen.
+
 The app automatically handles sleep/wake and lid close/open — your brightness setting is restored when you come back.
 
 ## License

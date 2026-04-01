@@ -1,5 +1,20 @@
 import Cocoa
 import MetalKit
+import Carbon.HIToolbox
+
+// MARK: - Kill switch: `xdr-boost --kill` terminates any running instance
+if CommandLine.arguments.contains("--kill") || CommandLine.arguments.contains("-k") {
+    let pipe = Pipe()
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+    proc.arguments = ["-f", "xdr-boost"]
+    proc.standardOutput = pipe
+    proc.standardError = pipe
+    try? proc.run()
+    proc.waitUntilExit()
+    fputs("All xdr-boost instances killed\n", stderr)
+    exit(0)
+}
 
 class Renderer: NSObject, MTKViewDelegate {
     var commandQueue: MTLCommandQueue
@@ -27,8 +42,10 @@ class XDRApp: NSObject, NSApplicationDelegate {
     var boostLevel: Double = 2.0
     var maxEDR: CGFloat = 1.0
     var wasActiveBeforeSleep = false
+    var hotkeyRef: EventHotKeyRef?
 
     var toggleItem: NSMenuItem!
+    var shortcutItem: NSMenuItem!
     var boostItems: [NSMenuItem] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -46,9 +63,41 @@ class XDRApp: NSObject, NSApplicationDelegate {
         }
 
         setupStatusBar()
+        registerGlobalHotkey()
         observeSleepWake()
-        fputs("XDR Boost ready — click the menu bar icon to toggle\n", stderr)
+        fputs("XDR Boost ready — click menu bar icon or press Ctrl+Shift+B to toggle\n", stderr)
+        fputs("Emergency kill: run `xdr-boost --kill` or press Ctrl+Shift+B\n", stderr)
         fputs("Max EDR: \(maxEDR)x\n", stderr)
+    }
+
+    // MARK: - Global Hotkey (Ctrl+Shift+B)
+
+    func registerGlobalHotkey() {
+        let hotkeyID = EventHotKeyID(signature: OSType(0x58445242), id: 1) // "XDRB"
+        var ref: EventHotKeyRef?
+
+        // Ctrl+Shift+B  (kVK_ANSI_B = 0x0B)
+        let status = RegisterEventHotKey(
+            UInt32(kVK_ANSI_B),
+            UInt32(controlKey | shiftKey),
+            hotkeyID,
+            GetApplicationEventTarget(),
+            0,
+            &ref
+        )
+
+        if status == noErr {
+            hotkeyRef = ref
+            // Install Carbon event handler for hotkey
+            var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+            InstallEventHandler(GetApplicationEventTarget(), { (_, event, userData) -> OSStatus in
+                let app = Unmanaged<XDRApp>.fromOpaque(userData!).takeUnretainedValue()
+                DispatchQueue.main.async { app.toggleXDR() }
+                return noErr
+            }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
+        } else {
+            fputs("Could not register global hotkey (Ctrl+Shift+B)\n", stderr)
+        }
     }
 
     // MARK: - Status Bar
@@ -64,6 +113,10 @@ class XDRApp: NSObject, NSApplicationDelegate {
         toggleItem = NSMenuItem(title: "Turn On", action: #selector(toggleXDR), keyEquivalent: "b")
         toggleItem.target = self
         menu.addItem(toggleItem)
+
+        shortcutItem = NSMenuItem(title: "Shortcut: Ctrl+Shift+B", action: nil, keyEquivalent: "")
+        shortcutItem.isEnabled = false
+        menu.addItem(shortcutItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -102,23 +155,14 @@ class XDRApp: NSObject, NSApplicationDelegate {
         let ws = NSWorkspace.shared.notificationCenter
         let nc = NotificationCenter.default
 
-        // Sleep — tear down overlay before display goes off
         ws.addObserver(self, selector: #selector(handleSleep),
                        name: NSWorkspace.willSleepNotification, object: nil)
-
-        // Screens off (lid close)
         ws.addObserver(self, selector: #selector(handleSleep),
                        name: NSWorkspace.screensDidSleepNotification, object: nil)
-
-        // Wake — restore overlay
         ws.addObserver(self, selector: #selector(handleWake),
                        name: NSWorkspace.didWakeNotification, object: nil)
-
-        // Screens on (lid open)
         ws.addObserver(self, selector: #selector(handleWake),
                        name: NSWorkspace.screensDidWakeNotification, object: nil)
-
-        // Display config changed (resolution, arrangement, external monitors)
         nc.addObserver(self, selector: #selector(handleDisplayChange),
                        name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
@@ -132,10 +176,8 @@ class XDRApp: NSObject, NSApplicationDelegate {
     }
 
     @objc func handleWake() {
-        // Small delay to let the display fully initialize
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self = self else { return }
-            // Refresh max EDR in case display changed
             self.maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
             if self.wasActiveBeforeSleep && self.maxEDR > 1.0 {
                 self.activate()
@@ -147,7 +189,6 @@ class XDRApp: NSObject, NSApplicationDelegate {
     @objc func handleDisplayChange() {
         maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
         if isActive {
-            // Recreate overlay to match new screen geometry
             deactivate()
             if maxEDR > 1.0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
