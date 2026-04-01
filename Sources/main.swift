@@ -36,7 +36,6 @@ class XDRApp: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var overlayWindow: NSWindow?
     var device: MTLDevice!
-    var triggerRenderer: Renderer?
     var boostRenderer: Renderer?
     var isActive = false
     var shouldBeActive = false  // tracks user intent across sleep/lock cycles
@@ -231,24 +230,7 @@ class XDRApp: NSObject, NSApplicationDelegate {
         window.sharingType = .none  // exclude from screenshots and screen recordings
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
-        let containerView = NSView(frame: frame)
-        containerView.wantsLayer = true
-        containerView.layer?.isOpaque = false
-
-        // 1x1 EDR trigger
-        let triggerView = MTKView(frame: NSRect(x: 0, y: 0, width: 1, height: 1), device: device)
-        triggerView.colorPixelFormat = .rgba16Float
-        triggerView.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
-        triggerView.layer?.isOpaque = false
-        triggerView.preferredFramesPerSecond = 5
-        triggerView.clearColor = MTLClearColor(red: Double(maxEDR), green: Double(maxEDR), blue: Double(maxEDR), alpha: 1.0)
-        if let layer = triggerView.layer as? CAMetalLayer {
-            layer.wantsExtendedDynamicRangeContent = true
-        }
-        triggerRenderer = Renderer(device: device)
-        triggerView.delegate = triggerRenderer
-
-        // Full-screen multiply blend boost
+        // Single MTKView that both triggers EDR and provides the boost
         let boostView = MTKView(frame: frame, device: device)
         boostView.colorPixelFormat = .rgba16Float
         boostView.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
@@ -257,14 +239,15 @@ class XDRApp: NSObject, NSApplicationDelegate {
         boostView.clearColor = MTLClearColor(red: boostLevel, green: boostLevel, blue: boostLevel, alpha: 1.0)
         if let layer = boostView.layer as? CAMetalLayer {
             layer.wantsExtendedDynamicRangeContent = true
-            layer.compositingFilter = "multiply"
         }
         boostRenderer = Renderer(device: device)
         boostView.delegate = boostRenderer
 
-        containerView.addSubview(triggerView)
-        containerView.addSubview(boostView)
-        window.contentView = containerView
+        // Multiply compositing on the content view layer — composites with
+        // the desktop content BEHIND the window, not within it
+        boostView.wantsLayer = true
+        window.contentView = boostView
+        window.contentView?.layer?.compositingFilter = "multiply"
         window.orderFrontRegardless()
         overlayWindow = window
 
@@ -277,7 +260,6 @@ class XDRApp: NSObject, NSApplicationDelegate {
     func deactivate() {
         overlayWindow?.orderOut(nil)
         overlayWindow = nil
-        triggerRenderer = nil
         boostRenderer = nil
 
         isActive = false
