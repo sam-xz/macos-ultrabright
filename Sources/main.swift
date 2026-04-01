@@ -222,7 +222,7 @@ class XDRApp: NSObject, NSApplicationDelegate {
 
         let frame = screen.frame
         let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
-        window.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
+        window.level = .screenSaver
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = false

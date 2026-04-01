@@ -78,7 +78,16 @@ pkill xdr-boost
 
 The app always starts with XDR **off** — you have to manually turn it on. So rebooting will always give you a normal screen.
 
-The app automatically handles sleep/wake and lid close/open — your brightness setting is restored when you come back.
+### Sleep, lid close, and lock screen
+
+A common problem with XDR brightness apps is that closing your laptop or locking the screen kills the brightness boost, and it doesn't come back when you return. xdr-boost fixes this with a watchdog that automatically restores your brightness within a few seconds after:
+
+- Closing and reopening the laptop lid
+- Locking and unlocking the screen
+- Sleep and wake
+- Plugging/unplugging external displays
+
+If you turned XDR on, it stays on — no matter what.
 
 ## License
 
