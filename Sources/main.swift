@@ -228,6 +228,7 @@ class XDRApp: NSObject, NSApplicationDelegate {
         window.hasShadow = false
         window.ignoresMouseEvents = true
         window.hidesOnDeactivate = false
+        window.sharingType = .none  // exclude from screenshots and screen recordings
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
         let containerView = NSView(frame: frame)
