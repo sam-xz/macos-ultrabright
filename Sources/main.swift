@@ -39,10 +39,11 @@ class XDRApp: NSObject, NSApplicationDelegate {
     var triggerRenderer: Renderer?
     var boostRenderer: Renderer?
     var isActive = false
+    var shouldBeActive = false  // tracks user intent across sleep/lock cycles
     var boostLevel: Double = 2.0
     var maxEDR: CGFloat = 1.0
-    var wasActiveBeforeSleep = false
     var hotkeyRef: EventHotKeyRef?
+    var watchdogTimer: Timer?
 
     var toggleItem: NSMenuItem!
     var shortcutItem: NSMenuItem!
@@ -149,66 +150,31 @@ class XDRApp: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
-    // MARK: - Sleep/Wake & Display Changes
+    // MARK: - Watchdog & Display Changes
 
     func observeSleepWake() {
-        let ws = NSWorkspace.shared.notificationCenter
-        let nc = NotificationCenter.default
-        let dnc = DistributedNotificationCenter.default()
+        // Display config changed (resolution, arrangement, external monitors)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleDisplayChange),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
-        ws.addObserver(self, selector: #selector(handleSleep),
-                       name: NSWorkspace.willSleepNotification, object: nil)
-        ws.addObserver(self, selector: #selector(handleSleep),
-                       name: NSWorkspace.screensDidSleepNotification, object: nil)
-        ws.addObserver(self, selector: #selector(handleWake),
-                       name: NSWorkspace.didWakeNotification, object: nil)
-        ws.addObserver(self, selector: #selector(handleWake),
-                       name: NSWorkspace.screensDidWakeNotification, object: nil)
-        nc.addObserver(self, selector: #selector(handleDisplayChange),
-                       name: NSApplication.didChangeScreenParametersNotification, object: nil)
-
-        // Screen lock/unlock — the lock screen kills our overlay
-        dnc.addObserver(self, selector: #selector(handleScreenLocked),
-                        name: NSNotification.Name("com.apple.screenIsLocked"), object: nil)
-        dnc.addObserver(self, selector: #selector(handleScreenUnlocked),
-                        name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil)
-    }
-
-    @objc func handleSleep() {
-        wasActiveBeforeSleep = isActive
-        if isActive {
-            deactivate()
-            fputs("Sleep — XDR paused\n", stderr)
-        }
-    }
-
-    @objc func handleScreenLocked() {
-        wasActiveBeforeSleep = isActive
-        if isActive {
-            deactivate()
-            fputs("Screen locked — XDR paused\n", stderr)
-        }
-    }
-
-    @objc func handleScreenUnlocked() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        // Watchdog: every 3 seconds, check if XDR should be on but overlay is dead
+        // This handles sleep/wake, lid close/open, lock/unlock — all of them
+        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
-            if self.wasActiveBeforeSleep && self.maxEDR > 1.0 {
-                self.activate()
-                fputs("Screen unlocked — XDR restored\n", stderr)
-            }
-        }
-    }
-
-    @objc func handleWake() {
-        // Wake without lock screen — restore immediately
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self = self else { return }
-            self.maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
-            if self.wasActiveBeforeSleep && self.maxEDR > 1.0 && !self.isActive {
-                self.activate()
-                fputs("Wake — XDR restored\n", stderr)
+            if self.shouldBeActive && !self.isActive {
+                self.maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
+                if self.maxEDR > 1.0 {
+                    self.activate()
+                    fputs("Watchdog — XDR restored\n", stderr)
+                }
+            } else if self.shouldBeActive && self.isActive {
+                // Check if overlay window is still on screen
+                if self.overlayWindow == nil || !self.overlayWindow!.isVisible {
+                    self.isActive = false
+                    self.activate()
+                    fputs("Watchdog — overlay recreated\n", stderr)
+                }
             }
         }
     }
@@ -217,7 +183,7 @@ class XDRApp: NSObject, NSApplicationDelegate {
         maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
         if isActive {
             deactivate()
-            if maxEDR > 1.0 {
+            if maxEDR > 1.0 && shouldBeActive {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     self?.activate()
                     fputs("Display changed — XDR refreshed\n", stderr)
@@ -229,7 +195,13 @@ class XDRApp: NSObject, NSApplicationDelegate {
     // MARK: - Toggle
 
     @objc func toggleXDR() {
-        if isActive { deactivate() } else { activate() }
+        if isActive {
+            shouldBeActive = false
+            deactivate()
+        } else {
+            shouldBeActive = true
+            activate()
+        }
     }
 
     @objc func setBoostLevel(_ sender: NSMenuItem) {
