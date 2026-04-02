@@ -160,19 +160,21 @@ class XDRApp: NSObject, NSApplicationDelegate {
         // Watchdog: every 3 seconds, check if XDR should be on but overlay is dead
         // This handles sleep/wake, lid close/open, lock/unlock — all of them
         watchdogTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            if self.shouldBeActive && !self.isActive {
+            guard let self = self, self.shouldBeActive else { return }
+
+            if let window = self.overlayWindow {
+                // Window exists — just make sure it's visible and in front
+                if !window.isVisible {
+                    window.orderFrontRegardless()
+                    fputs("Watchdog — window restored\n", stderr)
+                }
+            } else {
+                // Window is gone (nil) — need to fully recreate
+                self.isActive = false
                 self.maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
                 if self.maxEDR > 1.0 {
                     self.activate()
-                    fputs("Watchdog — XDR restored\n", stderr)
-                }
-            } else if self.shouldBeActive && self.isActive {
-                // Check if overlay window is still on screen
-                if self.overlayWindow == nil || !self.overlayWindow!.isVisible {
-                    self.isActive = false
-                    self.activate()
-                    fputs("Watchdog — overlay recreated\n", stderr)
+                    fputs("Watchdog — XDR recreated\n", stderr)
                 }
             }
         }
