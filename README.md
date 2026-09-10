@@ -13,6 +13,12 @@ BetterDisplay's extra options and paid features, MacOS Ultrabright is an alterna
 
 This fork continues development of the original project, which appeared unmaintained.
 
+## Screenshots
+
+| Brightness menu | XDR pop-up |
+| :---: | :---: |
+| <img src="docs/images/brightness-menu.png" alt="Brightness menu at 100% SDR and approximately 600 nits, with a slider up to 140%" width="340"> | <img src="docs/images/xdr-popup.png" alt="Brightness key pop-up at 131% XDR and approximately 1225 nits" width="240"> |
+
 ## Install
 
 1. Download the disk image. Quit other brightness utilities.
