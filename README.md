@@ -10,6 +10,7 @@ by Pieter Levels. It adds smooth brightness changes, a nits display and a macOS 
 
 I wanted free, simple brightness control. I did not want to pay for Vivid,
 and I did not need BetterDisplay's extra options or paid features.
+The original project also appeared unmaintained, so I continued development in this fork.
 
 ## Install
 
