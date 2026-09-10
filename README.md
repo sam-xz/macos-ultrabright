@@ -1,106 +1,61 @@
-# xdr-boost
+# MacOS Ultrabright
 
-Free and open-source XDR brightness booster for MacBook Pro. Like [Vivid](https://www.getvivid.app/), but free.
+Free brightness control for the Liquid Retina XDR display in a MacBook Pro.
+Use one slider or the brightness keys to move from SDR into XDR.
 
-Unlocks the full brightness of your Liquid Retina XDR display beyond the standard SDR limit. Your MacBook Pro can go up to 1600 nits — this tool lets you use it.
+[Download for Apple silicon](https://github.com/sam-xz/macos-ultrabright/releases/latest/download/MacOS-Ultrabright-arm64.dmg)
 
-## Features
-
-- Boosts screen brightness beyond the standard 500 nit SDR limit using XDR hardware
-- No white tint or washed-out colors — uses multiply compositing to preserve colors perfectly
-- Menu bar icon with brightness presets (1.5x, 2.0x, 3.0x, 4.0x)
-- Global keyboard shortcut (**Ctrl+Option+Cmd+V**) to toggle from anywhere
-- Survives sleep/wake, lid close/open, and lock/unlock — brightness auto-restores
-- Starts with XDR off — rebooting always gives you a normal screen
-- Emergency kill switch (`xdr-boost --kill`) if anything goes wrong
-- Single binary, no dependencies, ~250 lines of Swift
-- Launch agent for auto-start on login
-
-## How it works
-
-MacBook Pro displays can output up to 1600 nits, but macOS caps regular desktop content at ~500 nits. The extra brightness is reserved for HDR content.
-
-xdr-boost creates an invisible Metal overlay using `multiply` compositing with EDR (Extended Dynamic Range) values above 1.0. This triggers the display hardware to boost its backlight, making everything brighter while preserving colors perfectly — no white tint, no washed-out look.
-
-## Requirements
-
-- MacBook Pro with Liquid Retina XDR display (M1 Pro/Max or later)
-- macOS 12.0+
+This is a personal fork of [xdr-boost](https://github.com/levelsio/xdr-boost)
+by Pieter Levels. It adds smooth brightness changes, a nits display and a macOS app.
 
 ## Install
 
-```bash
-git clone https://github.com/levelsio/xdr-boost.git
-cd xdr-boost
-make build
+1. Download the disk image. Quit other brightness utilities.
+2. Drag **MacOS Ultrabright.app** to **Applications**.
+3. Eject the disk image. Open **MacOS Ultrabright**.
+4. Select the sun icon, then **Enable brightness keys…**.
+5. Allow **MacOS Ultrabright** in **System Settings → Privacy & Security → Accessibility**.
+
+The download is for an Apple silicon MacBook Pro with a built-in Liquid Retina
+XDR display. This version was developed on macOS 27.0 beta.
+
+The app uses a local signature and has no Apple notarisation. If macOS blocks
+it, follow [Apple's Open Anyway instructions](https://support.apple.com/en-gb/guide/mac-help/mh40616/mac).
+
+## Use
+
+- **0–100%:** normal SDR brightness.
+- **100–140%:** XDR brightness, up to an estimated **1400 nits**.
+- Press brightness up past 100% to enter XDR. Press down to return to SDR.
+- Hold **Shift+Option** for smaller steps.
+- Press **Ctrl+Option+Cmd+V** to switch XDR on or return to SDR.
+
+XDR changes follow the display refresh rate. A short pop-up shows the level and
+estimated nits. Nits are estimates; available brightness depends on the display.
+The app keeps your current brightness when it starts. Select **Quit** in the
+sun menu to close it and restore the display settings saved on entry to XDR.
+Normal SDR changes remain in effect.
+
+To start at login, add the app in **System Settings → General → Login Items**.
+If brightness keys stop working after an update, quit the app, remove its
+Accessibility entry, open it again and allow access.
+
+## Build
+
+Install Apple's Command Line Tools, then run:
+
+```sh
+git clone https://github.com/sam-xz/macos-ultrabright.git
+cd macos-ultrabright
+make dmg
 ```
 
-The binary will be at `.build/xdr-boost`.
+The outputs are `.build/MacOS Ultrabright.app` and `.build/MacOS-Ultrabright-arm64.dmg`.
+Use `make app` to build only the app. Builds target Apple silicon by default.
 
-### Install to PATH
+A Developer ID signature can be supplied with `CODE_SIGN_IDENTITY`.
+Apple notarisation is a separate release step.
 
-```bash
-sudo make install
-```
+## Licence
 
-### Start on login
-
-```bash
-sudo make install
-make launch-agent
-```
-
-### Uninstall
-
-```bash
-make remove-agent
-sudo make uninstall
-```
-
-## Usage
-
-```bash
-# Run with menu bar icon (default 2x boost)
-xdr-boost
-
-# Run with custom boost level
-xdr-boost 3.0
-```
-
-Click the **☀** icon in your menu bar to:
-- Toggle XDR brightness on/off
-- Choose brightness level (1.5x, 2.0x, 3.0x, 4.0x)
-- Quit
-
-### Keyboard shortcut
-
-**Ctrl+Option+Cmd+V** — toggle XDR brightness on/off from anywhere, no need to find the menu bar icon.
-
-### Emergency kill
-
-If something goes wrong and you can't see your screen:
-
-```bash
-# From terminal (even blind-type it)
-xdr-boost --kill
-
-# Or just
-pkill xdr-boost
-```
-
-The app always starts with XDR **off** — you have to manually turn it on. So rebooting will always give you a normal screen.
-
-### Sleep, lid close, and lock screen
-
-A common problem with XDR brightness apps is that closing your laptop or locking the screen kills the brightness boost, and it doesn't come back when you return. xdr-boost fixes this with a watchdog that automatically restores your brightness within a few seconds after:
-
-- Closing and reopening the laptop lid
-- Locking and unlocking the screen
-- Sleep and wake
-- Plugging/unplugging external displays
-
-If you turned XDR on, it stays on — no matter what.
-
-## License
-
-MIT
+[MIT](LICENSE). The original copyright notice is retained.

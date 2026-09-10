@@ -2,398 +2,428 @@ import Cocoa
 import MetalKit
 import Carbon.HIToolbox
 
-// MARK: - Kill switch: `xdr-boost --kill` terminates any running instance
-if CommandLine.arguments.contains("--kill") || CommandLine.arguments.contains("-k") {
-    let pipe = Pipe()
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-    proc.arguments = ["-f", "xdr-boost"]
-    proc.standardOutput = pipe
-    proc.standardError = pipe
-    try? proc.run()
-    proc.waitUntilExit()
-    fputs("All xdr-boost instances killed\n", stderr)
-    exit(0)
-}
-
-class Renderer: NSObject, MTKViewDelegate {
-    var commandQueue: MTLCommandQueue
-    init(device: MTLDevice) { self.commandQueue = device.makeCommandQueue()! }
+final class Renderer: NSObject, MTKViewDelegate {
+    let queue: MTLCommandQueue
+    private(set) var hasPresented = false
+    init(device: MTLDevice) { queue = device.makeCommandQueue()! }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     func draw(in view: MTKView) {
-        guard let desc = view.currentRenderPassDescriptor,
-              let buf = commandQueue.makeCommandBuffer(),
-              let enc = buf.makeRenderCommandEncoder(descriptor: desc) else { return }
-        enc.endEncoding()
+        guard let pass = view.currentRenderPassDescriptor, let buffer = queue.makeCommandBuffer(),
+              let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        encoder.endEncoding()
         if let drawable = view.currentDrawable {
-            buf.present(drawable)
+            if !hasPresented {
+                drawable.addPresentedHandler { [weak self] _ in
+                    DispatchQueue.main.async { self?.hasPresented = true }
+                }
+            }
+            buffer.present(drawable)
         }
-        buf.commit()
+        buffer.commit()
     }
 }
 
-class XDRApp: NSObject, NSApplicationDelegate {
+final class UltrabrightApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
-    var overlayWindow: NSWindow?
-    var boostView: MTKView?
-    var device: MTLDevice!
-    var boostRenderer: Renderer?
-    var isActive = false
-    var shouldBeActive = false  // tracks user intent across sleep/lock cycles
-    var boostLevel: Double = 2.0
-    var maxEDR: CGFloat = 1.0
-    var hotkeyRef: EventHotKeyRef?
-    var watchdogTimer: Timer?
-
-    var screenshotMonitor: Any?
-    var suppressedForScreenshot = false
-    var screenshotRestoreTimer: Timer?
-
+    var panel: BrightnessSliderView!
     var toggleItem: NSMenuItem!
-    var shortcutItem: NSMenuItem!
-    var boostItems: [NSMenuItem] = []
+    var keysItem: NSMenuItem!
+    let brightnessKeys = BrightnessKeys()
+    let brightnessHUD = BrightnessHUD()
+    var queuedKeyPercent: Double?
+    var keyGeneration = 0
+    var nextKeyAccessCheck = Date.distantPast
+    var hardware: HardwareBrightness!
+    var profile: BrightnessProfile!
+    var device: MTLDevice!
+    var percent = 0.0
+    var lastXDRPercent = 110.0
+    var gamma: GammaSession?
+    let gammaFrames = DisplayFrameClock()
+    var appliedGain: Float = 1
+    var targetGain: Float = 1
+    var lastGammaFrame = 0.0
+    var triggerStartedAt: Double?
+    var initialHeadroom = 1.0
+    var warmupProgress = 0.0
+    var previousSDRBrightness: Double?
+    var pendingSDRPercent: Double?
+    var window: NSWindow?
+    var renderer: Renderer?
+    var retryRestore = false
+    var restoreHardware = true
+    var wantsQuit = false
+    var message: String?
+    var lastWrite = Date.distantPast
+    var timer: Timer?
+    var signalSources: [DispatchSourceSignal] = []
+    var hotkey: EventHotKeyRef?
+    var wakePercent: Double?
+    var displayAsleep = false
+    var wakeReadyAt = Date.distantPast
+
+    func id(_ screen: NSScreen) -> CGDirectDisplayID {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+    }
+    var screen: NSScreen? { NSScreen.screens.first { id($0) == hardware?.display } }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard let dev = MTLCreateSystemDefaultDevice() else {
-            fputs("No Metal device\n", stderr); exit(1)
+        guard let builtIn = NSScreen.screens.first(where: { CGDisplayIsBuiltin(id($0)) != 0 }),
+              let hardware = HardwareBrightness(display: id(builtIn)), let current = hardware.read(),
+              let profile = BrightnessProfile.load(display: id(builtIn)),
+              let device = MTLCreateSystemDefaultDevice() else {
+            fputs("Could not read the built-in display's brightness calibration.\n", stderr)
+            let alert = NSAlert()
+            alert.messageText = "Display unavailable"
+            alert.informativeText = "MacOS Ultrabright could not read the built-in display's brightness controls. This app needs a Liquid Retina XDR display."
+            alert.addButton(withTitle: "Quit")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+            NSApp.terminate(nil); return
         }
-        device = dev
-        maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
-        guard maxEDR > 1.0 else {
-            fputs("Display doesn't support XDR\n", stderr); exit(1)
+        self.hardware = hardware; self.profile = profile; self.device = device
+        percent = current * 100
+        setupMenu()
+        registerHotkey()
+        brightnessKeys.onPress = { [weak self] up, fine in self?.brightnessKey(up: up, fine: fine) ?? false }
+        _ = brightnessKeys.start()
+        if CommandLine.arguments.contains("--request-key-access") { enableBrightnessKeys() }
+        for sig in [SIGINT, SIGTERM] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [weak self] in self?.quit() }
+            source.resume(); signalSources.append(source)
         }
-
-        if CommandLine.arguments.count > 1, let v = Double(CommandLine.arguments[1]) {
-            boostLevel = min(max(v, 1.0), Double(maxEDR))
-        }
-
-        setupStatusBar()
-        registerGlobalHotkey()
-        observeSleepWake()
-        observeScreenshots()
-        fputs("XDR Boost ready — click menu bar icon or press Ctrl+Option+Cmd+V to toggle\n", stderr)
-        fputs("Emergency kill: run `xdr-boost --kill` or press Ctrl+Option+Cmd+V\n", stderr)
-        fputs("Max EDR: \(maxEDR)x\n", stderr)
+        timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in self?.refresh() }
+        RunLoop.main.add(timer!, forMode: .common)
+        NotificationCenter.default.addObserver(self, selector: #selector(displayChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sleepDisplay), name: NSWorkspace.screensDidSleepNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(wakeDisplay), name: NSWorkspace.screensDidWakeNotification, object: nil)
+        updateUI()
+        fputs("MacOS Ultrabright ready: \(Int(percent.rounded()))%, SDR ceiling \(Int(profile.sdrNits)) nits, XDR target \(Int(profile.maximumNits)) nits. Starts without changing brightness.\n", stderr)
+        fputs("Brightness keys: \(brightnessKeys.isActive ? "enabled" : "Accessibility access required").\n", stderr)
     }
 
-    // MARK: - Global Hotkey (Ctrl+Option+Cmd+V)
-
-    func registerGlobalHotkey() {
-        let hotkeyID = EventHotKeyID(signature: OSType(0x58445242), id: 1) // "XDRB"
-        var ref: EventHotKeyRef?
-
-        // Ctrl+Option+Cmd+V  (kVK_ANSI_V = 0x09)
-        let status = RegisterEventHotKey(
-            UInt32(kVK_ANSI_V),
-            UInt32(controlKey | optionKey | cmdKey),
-            hotkeyID,
-            GetApplicationEventTarget(),
-            0,
-            &ref
-        )
-
-        if status == noErr {
-            hotkeyRef = ref
-            // Install Carbon event handler for hotkey
-            var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-            InstallEventHandler(GetApplicationEventTarget(), { (_, event, userData) -> OSStatus in
-                let app = Unmanaged<XDRApp>.fromOpaque(userData!).takeUnretainedValue()
-                DispatchQueue.main.async { app.toggleXDR() }
-                return noErr
-            }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
-        } else {
-            fputs("Could not register global hotkey (Ctrl+Option+Cmd+V)\n", stderr)
-        }
-    }
-
-    // MARK: - Status Bar
-
-    func setupStatusBar() {
+    func setupMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.title = "☀"
-        }
-
-        let menu = NSMenu()
-
-        toggleItem = NSMenuItem(title: "Turn On", action: #selector(toggleXDR), keyEquivalent: "b")
-        toggleItem.target = self
-        menu.addItem(toggleItem)
-
-        shortcutItem = NSMenuItem(title: "Shortcut: Ctrl+Option+Cmd+V", action: nil, keyEquivalent: "")
-        shortcutItem.isEnabled = false
-        menu.addItem(shortcutItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let levelHeader = NSMenuItem(title: "Brightness Level", action: nil, keyEquivalent: "")
-        levelHeader.isEnabled = false
-        menu.addItem(levelHeader)
-
-        let levels: [(String, Double)] = [
-            ("1.5x — Subtle", 1.5),
-            ("2.0x — Normal", 2.0),
-            ("3.0x — Bright", 3.0),
-            ("4.0x — Max", 4.0),
-        ]
-
-        for (title, level) in levels {
-            let item = NSMenuItem(title: title, action: #selector(setBoostLevel(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = Int(level * 100)
-            item.state = (level == boostLevel) ? .on : .off
-            menu.addItem(item)
-            boostItems.append(item)
-        }
-
-        menu.addItem(NSMenuItem.separator())
-
+        statusItem.button?.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: "MacOS Ultrabright brightness")
+        let menu = NSMenu(); menu.delegate = self
+        let item = NSMenuItem()
+        panel = BrightnessSliderView(target: self, action: #selector(sliderChanged(_:)))
+        item.view = panel; menu.addItem(item)
+        menu.addItem(.separator())
+        toggleItem = NSMenuItem(title: "Enable XDR", action: #selector(toggleXDR), keyEquivalent: "")
+        toggleItem.target = self; menu.addItem(toggleItem)
+        keysItem = NSMenuItem(title: "Enable brightness keys…", action: #selector(enableBrightnessKeys), keyEquivalent: "")
+        keysItem.target = self; menu.addItem(keysItem)
+        let shortcut = NSMenuItem(title: "Shortcut: Ctrl+Option+Cmd+V", action: nil, keyEquivalent: "")
+        shortcut.isEnabled = false; menu.addItem(shortcut)
+        menu.addItem(.separator())
+        let about = NSMenuItem(title: "About MacOS Ultrabright", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self; menu.addItem(about)
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
+        quitItem.target = self; menu.addItem(quitItem)
         statusItem.menu = menu
     }
-
-    // MARK: - Watchdog & Display Changes
-
-    func observeSleepWake() {
-        // Display config changed (resolution, arrangement, external monitors)
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(handleDisplayChange),
-            name: NSApplication.didChangeScreenParametersNotification, object: nil)
-
-        // Watchdog: every 3 seconds, check if XDR should be on but overlay is dead
-        // This handles sleep/wake, lid close/open, lock/unlock — all of them
-        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            guard let self = self, self.shouldBeActive, !self.suppressedForScreenshot else { return }
-
-            if let window = self.overlayWindow {
-                // Window exists — just make sure it's visible and in front
-                if !window.isVisible {
-                    window.orderFrontRegardless()
-                    fputs("Watchdog — window restored\n", stderr)
-                }
-            } else {
-                // Window is gone (nil) — need to fully recreate
-                self.isActive = false
-                self.maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
-                if self.maxEDR > 1.0 {
-                    self.activate()
-                    fputs("Watchdog — XDR recreated\n", stderr)
-                }
-            }
-        }
+    @objc func showAbout() {
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .credits: NSAttributedString(string: "Forked from xdr-boost by Pieter Levels.\nReleased under the MIT licence.")
+        ])
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    func menuWillOpen(_ menu: NSMenu) { refresh() }
+    func updateUI() {
+        guard panel != nil else { return }
+        let estimated = gamma == nil ? hardware.linear().map { $0 * profile.sdrNits } ?? profile.nits(at: percent) : profile.nits(at: percent)
+        panel.update(percent: percent, nits: estimated, message: message)
+        toggleItem.title = retryRestore ? "Retry Display Restoration" : gamma == nil ? "Enable XDR" : "Return to SDR"
+        keysItem.title = brightnessKeys.isActive ? "Brightness keys enabled" : "Enable brightness keys…"
+        keysItem.action = brightnessKeys.isActive ? nil : #selector(enableBrightnessKeys)
+        keysItem.isEnabled = !brightnessKeys.isActive
+        statusItem.button?.toolTip = "MacOS Ultrabright · \(Int(percent.rounded()))% · ≈\(Int(estimated.rounded())) nits"
+    }
+    @objc func sliderChanged(_ sender: NSSlider) {
+        cancelQueuedKeys()
+        wakePercent = nil
+        setBrightness(sender.doubleValue.rounded())
+    }
+    @objc func toggleXDR() {
+        cancelQueuedKeys()
+        wakePercent = nil
+        if retryRestore { _ = releaseBoost(restoreNative: restoreHardware); updateUI(); return }
+        if gamma != nil { setBrightness(100) } else { setBrightness(lastXDRPercent) }
     }
 
-    @objc func handleDisplayChange() {
-        maxEDR = NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
-        if isActive {
-            guard let screen = NSScreen.main, let window = overlayWindow else { return }
-
-            // Only tear down / recreate when the screen frame actually changed
-            // (resolution or arrangement change). Brightness changes just update EDR
-            // headroom and should NOT destroy the overlay.
-            if window.frame != screen.frame {
-                deactivate()
-                if maxEDR > 1.0 && shouldBeActive {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                        self?.activate()
-                        fputs("Display changed — XDR refreshed\n", stderr)
-                    }
-                }
-            } else {
-                boostLevel = min(boostLevel, Double(maxEDR))
-                fputs("Display params changed — maxEDR: \(maxEDR)x\n", stderr)
-            }
+    @objc func enableBrightnessKeys() {
+        if !brightnessKeys.start() {
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
         }
+        updateUI()
     }
 
-    // MARK: - Screenshot suppression
-    //
-    // The overlay uses a `multiply` compositing filter, which can't be excluded
-    // from screen capture without turning the shot black (see activate()). So to
-    // keep screenshots looking normal we briefly hide the overlay while a capture
-    // is in progress, then restore it.
-    //
-    // Detection: a non-consuming global key monitor watches for the system
-    // screenshot shortcuts (⌘⇧3/4/5/6). Requires Input Monitoring permission.
-
-    func observeScreenshots() {
-        // keyCodes: 3 = 20, 4 = 21, 5 = 23, 6 = 22
-        let shotKeys: Set<UInt16> = [20, 21, 23, 22]
-        screenshotMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self else { return }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if flags == [.command, .shift] && shotKeys.contains(event.keyCode) {
-                self.suppressForScreenshot()
-            }
-        }
-        if screenshotMonitor == nil {
-            fputs("Could not install screenshot monitor (grant Input Monitoring permission)\n", stderr)
-        }
+    func cancelQueuedKeys() {
+        keyGeneration += 1; queuedKeyPercent = nil
+        brightnessHUD.hide()
     }
 
-    func suppressForScreenshot() {
-        guard isActive, let window = overlayWindow, !suppressedForScreenshot else { return }
-        suppressedForScreenshot = true
-        window.orderOut(nil)
-        fputs("Screenshot detected — overlay hidden\n", stderr)
-        scheduleScreenshotRestore()
-    }
-
-    // Matches the interactive screenshot UI process. The bundle id has moved
-    // around between macOS versions (e.g. Tahoe), so fall back to the bundle/
-    // executable path — otherwise a renamed id breaks detection and the overlay
-    // gets restored mid-capture (which is what corrupts ⌘⇧4-Space window shots).
-    func isCaptureUI(_ app: NSRunningApplication) -> Bool {
-        if let id = app.bundleIdentifier,
-           id == "com.apple.screencaptureui" || id == "com.apple.screenshot" {
+    // Decide in the event callback; perform display writes after it returns.
+    func brightnessKey(up: Bool, fine: Bool) -> Bool {
+        guard !wantsQuit, !displayAsleep, screen != nil else { return false }
+        wakePercent = nil
+        guard let native = hardware.read() else { return false }
+        let step = fine ? 1.5625 : 6.25
+        if retryRestore {
+            // Keep newer key input in the pending native target. A retry must
+            // not overwrite it or re-enable XDR before restoration succeeds.
+            let current = pendingSDRPercent
+                ?? (restoreHardware ? previousSDRBrightness.map { $0 * 100 } : nil)
+                ?? native * 100
+            pendingSDRPercent = min(100, max(0, current + (up ? step : -step)))
             return true
         }
-        let path = (app.bundleURL ?? app.executableURL)?.path.lowercased() ?? ""
-        return path.contains("screencaptureui") || path.contains("screenshot")
-    }
-
-    func captureUIIsRunning() -> Bool {
-        NSWorkspace.shared.runningApplications.contains { isCaptureUI($0) }
-    }
-
-    func scheduleScreenshotRestore() {
-        screenshotRestoreTimer?.invalidate()
-        var ticks = 0
-        var sawCaptureUI = false
-        // Keep the overlay hidden for the WHOLE capture session. Interactive
-        // captures (⌘⇧4 region, ⌘⇧4-Space window pick, ⌘⇧5 panel) spawn the
-        // capture UI — wait until we've seen it appear AND go away, so a slow
-        // window pick can't trigger an early restore. Instant captures (⌘⇧3/6)
-        // never spawn a UI, so a ticks>=3 (~1.2s) grace covers them. The grace
-        // also absorbs the brief lag before the UI first shows up. Hard cap
-        // (~30s) guarantees the overlay always returns.
-        screenshotRestoreTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] timer in
-            guard let self = self else { timer.invalidate(); return }
-            ticks += 1
-            if self.captureUIIsRunning() {
-                sawCaptureUI = true
-                return  // stay hidden while the capture UI is up
-            }
-            let interactiveDone = sawCaptureUI
-            let instantDone = !sawCaptureUI && ticks >= 3
-            if interactiveDone || instantDone || ticks > 75 {
-                timer.invalidate()
-                self.screenshotRestoreTimer = nil
-                self.restoreAfterScreenshot()
+        let current = queuedKeyPercent ?? (gamma == nil ? native * 100 : percent)
+        guard queuedKeyPercent != nil || gamma != nil || (up && native >= 0.999) else { return false }
+        var target = min(140, max(0, current + (up ? step : -step)))
+        // Stop on the SDR boundary before continuing down into native brightness.
+        if current > 100, target < 100 { target = 100 }
+        queuedKeyPercent = target; keyGeneration += 1
+        let generation = keyGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, generation == self.keyGeneration else { return }
+            self.queuedKeyPercent = nil
+            guard !self.wantsQuit, !self.displayAsleep, !self.retryRestore else { return }
+            if self.setBrightness(target), let screen = self.screen {
+                self.brightnessHUD.show(percent: self.percent, nits: self.profile.nits(at: self.percent), screen: screen)
             }
         }
+        return true
     }
 
-    func restoreAfterScreenshot() {
-        guard suppressedForScreenshot else { return }
-        suppressedForScreenshot = false
-        guard shouldBeActive else { return }
-        if overlayWindow != nil {
-            overlayWindow?.orderFrontRegardless()
+    @discardableResult func setBrightness(_ value: Double) -> Bool {
+        guard value.isFinite, (0...140).contains(value), !retryRestore else { return false }
+        message = nil
+        lastWrite = Date()
+        if value <= 100 {
+            pendingSDRPercent = value
+            if gamma != nil, appliedGain > 1 {
+                animateGamma(to: 1)
+            } else {
+                guard releaseBoost(restoreNative: false) else { updateUI(); return false }
+            }
+            percent = value
         } else {
-            activate()
+            guard let screen = screen, screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1 else {
+                fail("XDR is unavailable on this display"); return false
+            }
+            if gamma == nil {
+                guard let before = hardware.read(), let session = GammaSession(display: hardware.display) else {
+                    fail("Quit other brightness utilities first"); return false
+                }
+                gamma = session; previousSDRBrightness = before
+                guard hardware.write(1) else {
+                    _ = releaseBoost(restoreNative: true); fail("Could not set SDR brightness"); return false
+                }
+                createTrigger(screen)
+            }
+            pendingSDRPercent = nil
+            animateGamma(to: profile.gain(at: value))
+            percent = value; lastXDRPercent = value
         }
-        fputs("Screenshot done — overlay restored\n", stderr)
+        updateUI()
+        return true
+    }
+    func fail(_ text: String) {
+        message = text; fputs("\(text)\n", stderr)
+        if gamma == nil, let current = hardware.read() { percent = current * 100 }
+        updateUI()
     }
 
-    // MARK: - Toggle
+    func animateGamma(to gain: Float) {
+        targetGain = gain
+        guard !gammaFrames.isRunning, let screen else { return }
+        lastGammaFrame = CACurrentMediaTime()
+        gammaFrames.start(screen: screen) { [weak self] in self?.advanceGamma() }
+    }
 
-    @objc func toggleXDR() {
-        if isActive {
-            shouldBeActive = false
-            deactivate()
-        } else {
-            shouldBeActive = true
-            activate()
+    func advanceGamma() {
+        guard let gamma, let screen, !displayAsleep, !wantsQuit, !retryRestore else {
+            gammaFrames.stop(); return
+        }
+        let now = CACurrentMediaTime()
+        let elapsed = now - lastGammaFrame
+        lastGammaFrame = now
+        // A native edit during the fade takes precedence over its queued target.
+        if let native = hardware.read(), native < 0.999 {
+            pendingSDRPercent = nil; cancelQueuedKeys()
+            _ = releaseBoost(restoreNative: false); updateUI(); return
+        }
+        var availableTarget = targetGain
+        if targetGain > 1, let started = triggerStartedAt {
+            let headroom = Double(screen.maximumExtendedDynamicRangeColorComponentValue)
+            let span = profile.maximumHeadroom - initialHeadroom
+            if renderer?.hasPresented == true {
+                if span <= 0.002 {
+                    warmupProgress = 1
+                } else {
+                    warmupProgress = max(warmupProgress, min(1, max(0, (headroom - initialHeadroom) / span)))
+                }
+            }
+            if warmupProgress >= 0.998 {
+                triggerStartedAt = nil
+            } else if now - started > 1.5 {
+                // Do not apply the full curve while the display cannot sustain it.
+                let requiredHeadroom = profile.nits(at: percent) / profile.sdrNits
+                if renderer?.hasPresented == true, headroom >= requiredHeadroom, warmupProgress > 0 {
+                    triggerStartedAt = nil; warmupProgress = 1
+                } else {
+                    cancelQueuedKeys()
+                    _ = releaseBoost(restoreNative: true)
+                    fail("XDR brightness is unavailable at present"); return
+                }
+            }
+            availableTarget = 1 + (targetGain - 1) * Float(warmupProgress)
+        }
+        let next = BrightnessTransition.nextGain(from: appliedGain, to: availableTarget, elapsed: elapsed)
+        if next != appliedGain {
+            guard gamma.apply(gain: next) else {
+                cancelQueuedKeys()
+                _ = releaseBoost(restoreNative: true); fail("Could not update XDR brightness"); return
+            }
+            appliedGain = next; lastWrite = Date()
+        }
+        if appliedGain == targetGain {
+            gammaFrames.stop()
+            if targetGain == 1, pendingSDRPercent != nil {
+                _ = releaseBoost(restoreNative: false); updateUI()
+            }
         }
     }
 
-    @objc func setBoostLevel(_ sender: NSMenuItem) {
-        boostLevel = Double(sender.tag) / 100.0
-        for item in boostItems {
-            item.state = (item.tag == sender.tag) ? .on : .off
-        }
-        if isActive, let view = boostView {
-            // Update in-place — no teardown, no flash
-            view.clearColor = MTLClearColor(red: boostLevel, green: boostLevel, blue: boostLevel, alpha: 1.0)
-            view.draw()  // force immediate frame so there's no black gap
-        } else {
-            shouldBeActive = true
-            activate()
-        }
-    }
-
-    // MARK: - XDR Overlay
-
-    func activate() {
-        guard let screen = NSScreen.main else { return }
-
-        let frame = screen.frame
+    func createTrigger(_ screen: NSScreen) {
+        triggerStartedAt = CACurrentMediaTime()
+        initialHeadroom = Double(screen.maximumExtendedDynamicRangeColorComponentValue)
+        warmupProgress = 0
+        let frame = NSRect(x: screen.frame.minX, y: screen.frame.minY, width: 8, height: 8)
         let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
-        window.level = .screenSaver
-        window.backgroundColor = .clear
-        window.isOpaque = false
-        window.hasShadow = false
-        window.ignoresMouseEvents = true
-        window.hidesOnDeactivate = false
-        // NOTE: Do NOT set sharingType = .none here. The multiply compositing filter
-        // is still applied during screen capture, and multiplying by an excluded (black)
-        // window makes the entire screenshot/screen go black.
+        window.level = .screenSaver; window.backgroundColor = .clear; window.isOpaque = false
+        window.hasShadow = false; window.ignoresMouseEvents = true; window.hidesOnDeactivate = false
+        window.sharingType = .none
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        let view = MTKView(frame: NSRect(origin: .zero, size: frame.size), device: device)
+        view.colorPixelFormat = .rgba16Float
+        view.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+        view.preferredFramesPerSecond = 10
+        let white = Double(screen.maximumPotentialExtendedDynamicRangeColorComponentValue)
+        view.clearColor = MTLClearColor(red: white, green: white, blue: white, alpha: 1)
+        (view.layer as? CAMetalLayer)?.wantsExtendedDynamicRangeContent = true
+        renderer = Renderer(device: device); view.delegate = renderer
+        window.contentView = view; window.orderFrontRegardless(); self.window = window
+        // Submit the first frame now instead of waiting for the 10 Hz keep-alive.
+        view.draw()
+    }
 
-        // Single MTKView that both triggers EDR and provides the boost
-        let boostView = MTKView(frame: frame, device: device)
-        boostView.colorPixelFormat = .rgba16Float
-        boostView.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
-        boostView.layer?.isOpaque = false
-        boostView.preferredFramesPerSecond = 10
-        boostView.clearColor = MTLClearColor(red: boostLevel, green: boostLevel, blue: boostLevel, alpha: 1.0)
-        if let layer = boostView.layer as? CAMetalLayer {
-            layer.wantsExtendedDynamicRangeContent = true
+    @discardableResult func releaseBoost(restoreNative: Bool) -> Bool {
+        gammaFrames.stop(); triggerStartedAt = nil
+        restoreHardware = restoreNative
+        guard gamma?.restore() != false else {
+            retryRestore = true; message = "Restoring display…"; return false
         }
-        boostRenderer = Renderer(device: device)
-        boostView.delegate = boostRenderer
-
-        // Multiply compositing on the content view layer — composites with
-        // the desktop content BEHIND the window, not within it
-        boostView.wantsLayer = true
-        window.contentView = boostView
-        window.contentView?.layer?.compositingFilter = "multiply"
-        window.orderFrontRegardless()
-        overlayWindow = window
-        self.boostView = boostView
-
-        isActive = true
-        statusItem.button?.title = "☀︎"
-        toggleItem.title = "Turn Off"
-        fputs("XDR ON — \(boostLevel)x\n", stderr)
+        appliedGain = 1; targetGain = 1
+        window?.orderOut(nil); window = nil; renderer = nil
+        let nativeTarget = pendingSDRPercent.map { $0 / 100 } ?? (restoreNative ? previousSDRBrightness : nil)
+        if let target = nativeTarget, !hardware.write(target) {
+            retryRestore = true; message = "Restoring display…"; return false
+        }
+        pendingSDRPercent = nil
+        gamma = nil; previousSDRBrightness = nil; retryRestore = false; message = nil
+        if let current = hardware?.read() { percent = current * 100 }
+        return true
+    }
+    func refresh() {
+        guard hardware != nil else { return }
+        if !wantsQuit, !displayAsleep, Date() >= nextKeyAccessCheck {
+            nextKeyAccessCheck = Date().addingTimeInterval(3)
+            if !brightnessKeys.isActive, AXIsProcessTrusted(), brightnessKeys.start() {
+                fputs("Brightness keys enabled.\n", stderr)
+            }
+        }
+        if retryRestore {
+            if releaseBoost(restoreNative: restoreHardware), wantsQuit { quit(); return }
+        } else if let current = hardware.read(), Date().timeIntervalSince(lastWrite) > 0.5 {
+            // Respect native edits made in System Settings or without key access.
+            if gamma != nil, current < 0.999 {
+                cancelQueuedKeys(); _ = releaseBoost(restoreNative: false)
+            }
+            if gamma == nil { percent = current * 100 }
+        }
+        resumeAfterWakeIfReady()
+        updateUI()
+    }
+    @objc func displayChanged() {
+        guard let screen = screen else {
+            cancelQueuedKeys()
+            if gamma != nil { _ = releaseBoost(restoreNative: true) }
+            updateUI(); return
+        }
+        // Headroom notifications do not rebuild the small trigger.
+        if let window = window {
+            let origin = NSPoint(x: screen.frame.minX, y: screen.frame.minY)
+            if window.frame.origin != origin { window.setFrameOrigin(origin) }
+        }
+    }
+    @objc func sleepDisplay() {
+        cancelQueuedKeys(); brightnessKeys.resetHeldKeys()
+        displayAsleep = true
+        if gamma != nil, !retryRestore {
+            wakePercent = percent
+            _ = releaseBoost(restoreNative: true)
+        }
+    }
+    @objc func wakeDisplay() {
+        displayAsleep = false
+        wakeReadyAt = Date().addingTimeInterval(1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.resumeAfterWakeIfReady()
+        }
+    }
+    func resumeAfterWakeIfReady() {
+        guard !wantsQuit, !displayAsleep, !retryRestore, Date() >= wakeReadyAt,
+              let resume = wakePercent else { return }
+        if setBrightness(resume) || !retryRestore { wakePercent = nil }
     }
 
-    func deactivate() {
-        overlayWindow?.orderOut(nil)
-        overlayWindow = nil
-        boostView = nil
-        boostRenderer = nil
-
-        isActive = false
-        statusItem.button?.title = "☀"
-        toggleItem.title = "Turn On"
-        fputs("XDR OFF\n", stderr)
+    func registerHotkey() {
+        let identifier = EventHotKeyID(signature: OSType(0x554C4252), id: 1)
+        guard RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(controlKey | optionKey | cmdKey), identifier, GetApplicationEventTarget(), 0, &hotkey) == noErr else { return }
+        var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, pointer in
+            guard let pointer = pointer else { return noErr }
+            let app = Unmanaged<UltrabrightApp>.fromOpaque(pointer).takeUnretainedValue()
+            DispatchQueue.main.async { app.toggleXDR() }; return noErr
+        }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), nil)
     }
-
     @objc func quit() {
-        deactivate()
-        NSApp.terminate(nil)
+        if prepareToTerminate() { NSApp.terminate(nil) }
     }
+    func prepareToTerminate() -> Bool {
+        cancelQueuedKeys()
+        wantsQuit = true; wakePercent = nil
+        guard releaseBoost(restoreNative: true) else { updateUI(); return false }
+        return true
+    }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        prepareToTerminate() ? .terminateNow : .terminateCancel
+    }
+    func applicationWillTerminate(_ notification: Notification) {
+        timer?.invalidate(); brightnessKeys.stop()
+    }
+
 }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-let del = XDRApp()
-app.delegate = del
-signal(SIGINT) { _ in exit(0) }
-signal(SIGTERM) { _ in exit(0) }
+let delegate = UltrabrightApp()
+app.delegate = delegate
 app.run()

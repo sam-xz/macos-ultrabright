@@ -1,0 +1,29 @@
+MacOS Ultrabright
+
+1. Quit other brightness utilities.
+2. Drag MacOS Ultrabright.app to Applications.
+3. Eject this disk image. Open MacOS Ultrabright from Applications.
+4. Select the sun icon in the menu bar.
+5. Select Enable brightness keys. Allow MacOS Ultrabright in
+   System Settings > Privacy & Security > Accessibility.
+
+Use the brightness keys or slider. At 100%, press brightness up again to enter
+XDR. The limit is 140%. Hold Shift+Option for smaller steps.
+The nits display is an estimate. Actual brightness depends on the display.
+The app keeps your current brightness when it starts.
+Select Quit in the sun menu to close the app and restore the display.
+
+This release is for an Apple silicon MacBook Pro with a built-in Liquid Retina
+XDR display. It was developed on macOS 27.0 beta.
+
+The app uses a local signature and has no Apple notarisation. If macOS blocks
+it, open System Settings > Privacy & Security and select Open Anyway.
+Use this option only for a download from the project's GitHub release page:
+https://github.com/sam-xz/macos-ultrabright/releases
+
+After an update, a previous Accessibility entry can stop working. Quit the app,
+remove its entry from Accessibility, open the app again and allow access.
+To start at login, add the app in System Settings > General > Login Items.
+
+Forked from xdr-boost by Pieter Levels: https://github.com/levelsio/xdr-boost
+Released under the MIT licence. The original licence is included in the app.
