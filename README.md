@@ -53,9 +53,6 @@ make dmg
 The outputs are `.build/MacOS Ultrabright.app` and `.build/MacOS-Ultrabright-arm64.dmg`.
 Use `make app` to build only the app. Builds target Apple silicon by default.
 
-A Developer ID signature can be supplied with `CODE_SIGN_IDENTITY`.
-Apple notarisation is a separate release step.
-
 ## Licence
 
-[MIT](LICENSE). The original copyright notice is retained.
+[MIT](LICENSE).
