@@ -8,9 +8,10 @@ Use one slider or the brightness keys to move from SDR into XDR.
 This is a personal fork of [xdr-boost](https://github.com/levelsio/xdr-boost)
 by Pieter Levels. It adds smooth brightness changes, a nits display and a macOS app.
 
-I wanted free, simple brightness control. I did not want to pay for Vivid,
-and I did not need BetterDisplay's extra options or paid features.
-The original project also appeared unmaintained, so I continued development in this fork.
+If you want free, simple brightness control without paying for Vivid or using
+BetterDisplay's extra options and paid features, MacOS Ultrabright is an alternative.
+
+This fork continues development of the original project, which appeared unmaintained.
 
 ## Install
 
