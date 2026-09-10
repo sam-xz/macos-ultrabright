@@ -63,6 +63,7 @@ make dmg
 
 The outputs are `.build/MacOS Ultrabright.app` and `.build/MacOS-Ultrabright-arm64.dmg`.
 Use `make app` to build only the app. Builds target Apple silicon by default.
+The first disk image build downloads its packaging tools into `.build/dmg-tools`.
 
 ## Licence
 
