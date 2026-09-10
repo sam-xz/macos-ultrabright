@@ -8,6 +8,9 @@ Use one slider or the brightness keys to move from SDR into XDR.
 This is a personal fork of [xdr-boost](https://github.com/levelsio/xdr-boost)
 by Pieter Levels. It adds smooth brightness changes, a nits display and a macOS app.
 
+I wanted free, simple brightness control. I did not want to pay for Vivid,
+and I did not need BetterDisplay's extra options or paid features.
+
 ## Install
 
 1. Download the disk image. Quit other brightness utilities.
