@@ -17,7 +17,7 @@ This fork continues development of the original project, which appeared unmainta
 
 | Brightness menu | XDR pop-up |
 | :---: | :---: |
-| <img src="docs/images/brightness-menu.png" alt="Brightness menu at 100% SDR and approximately 600 nits, with a slider up to 140%" width="340"> | <img src="docs/images/xdr-popup.png" alt="Brightness key pop-up at 131% XDR and approximately 1225 nits" width="240"> |
+| <img src="docs/brightness-menu.png" alt="Brightness menu at 100% SDR and approximately 600 nits, with a slider up to 140%" width="388"> | <img src="docs/xdr-popup.png" alt="Brightness key pop-up at 131% XDR and approximately 1225 nits" width="288"> |
 
 ## Install
 
